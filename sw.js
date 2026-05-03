@@ -1,4 +1,4 @@
-const CACHE = "korean-app-v2";
+const CACHE = "korean-app-v3";
 const ASSETS = [
   "./",
   "./index.html",
@@ -6,6 +6,7 @@ const ASSETS = [
   "./app.js",
   "./manifest.webmanifest",
   "./icon.svg",
+  "./vendor/supabase.js",
 ];
 
 self.addEventListener("install", (e) => {

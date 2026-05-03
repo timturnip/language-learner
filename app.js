@@ -1,8 +1,14 @@
 "use strict";
 
+/* ---------- Config ---------- */
+
+const SUPABASE_URL = "https://pphyqzsngumlqqznynvi.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_4OiwGIFW5NumANvYdHQKyg_PGDQ1pl4";
+
 const STORAGE_KEY = "korean-sentences-v1";
 const SETTINGS_KEY = "korean-settings-v1";
 const GROUPS_KEY = "korean-groups-v1";
+const MIGRATION_KEY = "korean-migrated-v2";
 
 const DEFAULT_SETTINGS = {
   englishReps: 1,
@@ -24,6 +30,7 @@ const state = {
   search: "",
   editingId: null,
   pendingImport: null,     // { sentences: [...], groupColumnPresent: bool }
+  user: null,              // current Supabase user (or null)
   player: {
     queue: [],
     index: 0,
@@ -34,11 +41,198 @@ const state = {
   },
 };
 
-/* ---------- Persistence + migration ---------- */
+/* ---------- Supabase client ---------- */
+
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: {
+    persistSession: true,
+    autoRefreshToken: true,
+    detectSessionInUrl: true,
+  },
+});
+
+/* ---------- IDs ---------- */
 
 function uid() {
-  return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  // Fallback v4
+  const a = new Uint8Array(16);
+  crypto.getRandomValues(a);
+  a[6] = (a[6] & 0x0f) | 0x40;
+  a[8] = (a[8] & 0x3f) | 0x80;
+  const h = Array.from(a, (b) => b.toString(16).padStart(2, "0"));
+  return `${h.slice(0,4).join("")}-${h.slice(4,6).join("")}-${h.slice(6,8).join("")}-${h.slice(8,10).join("")}-${h.slice(10,16).join("")}`;
 }
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const isUUID = (s) => typeof s === "string" && UUID_RE.test(s);
+
+/* ---------- Remote (Supabase) helpers ---------- */
+
+const syncIndicatorEl = document.getElementById("sync-indicator");
+
+function showSync(text, isError = false) {
+  if (!syncIndicatorEl) return;
+  syncIndicatorEl.hidden = !text;
+  syncIndicatorEl.textContent = text || "";
+  syncIndicatorEl.classList.toggle("error", !!isError);
+}
+
+function rowToSentence(r) {
+  return {
+    id: r.id,
+    english: r.english,
+    korean: r.korean,
+    groupIds: r.group_ids || [],
+    audioPath: r.audio_path || null,
+    audioVoice: r.audio_voice || null,
+    createdAt: r.created_at ? new Date(r.created_at).getTime() : Date.now(),
+  };
+}
+
+function rowToGroup(r) {
+  return {
+    id: r.id,
+    name: r.name,
+    playCount: r.play_count || 0,
+    createdAt: r.created_at ? new Date(r.created_at).getTime() : Date.now(),
+  };
+}
+
+function sentenceToRow(s) {
+  return {
+    id: s.id,
+    user_id: state.user?.id,
+    english: s.english,
+    korean: s.korean,
+    group_ids: s.groupIds || [],
+  };
+}
+
+function groupToRow(g) {
+  return {
+    id: g.id,
+    user_id: state.user?.id,
+    name: g.name,
+    play_count: g.playCount || 0,
+  };
+}
+
+async function remoteSyncAll() {
+  if (!state.user) return;
+  showSync("Syncing…");
+  try {
+    const [sentencesRes, groupsRes] = await Promise.all([
+      sb.from("sentences").select("*").order("created_at", { ascending: false }),
+      sb.from("groups").select("*").order("name"),
+    ]);
+    if (sentencesRes.error) throw sentencesRes.error;
+    if (groupsRes.error) throw groupsRes.error;
+    state.sentences = sentencesRes.data.map(rowToSentence);
+    state.groups = groupsRes.data.map(rowToGroup);
+    saveSentences();
+    saveGroups();
+    showSync("");
+  } catch (err) {
+    console.error("sync error", err);
+    showSync(navigator.onLine ? "Sync error" : "Offline", true);
+  }
+}
+
+function remoteUpsertSentence(s) {
+  if (!state.user) return;
+  sb.from("sentences").upsert(sentenceToRow(s)).then(({ error }) => {
+    if (error) {
+      console.error("upsert sentence", error);
+      showSync("Save failed", true);
+    }
+  });
+}
+
+function remoteDeleteSentence(id) {
+  if (!state.user) return;
+  sb.from("sentences").delete().eq("id", id).then(({ error }) => {
+    if (error) console.error("delete sentence", error);
+  });
+}
+
+function remoteUpsertGroup(g) {
+  if (!state.user) return;
+  sb.from("groups").upsert(groupToRow(g)).then(({ error }) => {
+    if (error) console.error("upsert group", error);
+  });
+}
+
+function remoteDeleteGroup(id) {
+  if (!state.user) return;
+  sb.from("groups").delete().eq("id", id).then(({ error }) => {
+    if (error) console.error("delete group", error);
+  });
+}
+
+function remoteIncrementGroupPlay(id) {
+  if (!state.user) return;
+  sb.rpc("increment_group_play_count", { g: id }).then(({ error }) => {
+    if (error) console.error("increment play", error);
+  });
+}
+
+async function remoteBulkInsert(sentences, groups) {
+  if (!state.user) return;
+  if (groups.length) {
+    const { error } = await sb.from("groups").upsert(groups.map(groupToRow));
+    if (error) throw error;
+  }
+  if (sentences.length) {
+    const { error } = await sb.from("sentences").upsert(sentences.map(sentenceToRow));
+    if (error) throw error;
+  }
+}
+
+/* ---------- One-time migration of pre-Supabase local data ---------- */
+
+async function migrateLocalIfNeeded() {
+  if (!state.user) return;
+  if (localStorage.getItem(MIGRATION_KEY)) return;
+
+  const hasLocal = state.sentences.length || state.groups.length;
+  if (!hasLocal) {
+    localStorage.setItem(MIGRATION_KEY, "1");
+    return;
+  }
+
+  showSync("Uploading existing data…");
+
+  // Map any non-UUID group IDs to fresh UUIDs and rewrite references.
+  const idMap = new Map();
+  for (const g of state.groups) {
+    if (!isUUID(g.id)) idMap.set(g.id, uid());
+  }
+  const newGroups = state.groups.map((g) => ({
+    ...g,
+    id: idMap.get(g.id) || g.id,
+  }));
+  const newSentences = state.sentences.map((s) => ({
+    ...s,
+    id: isUUID(s.id) ? s.id : uid(),
+    groupIds: (s.groupIds || []).map((gid) => idMap.get(gid) || gid),
+  }));
+
+  try {
+    await remoteBulkInsert(newSentences, newGroups);
+    state.sentences = newSentences;
+    state.groups = newGroups;
+    saveSentences();
+    saveGroups();
+    localStorage.setItem(MIGRATION_KEY, "1");
+    showSync("");
+  } catch (err) {
+    console.error("migration error", err);
+    showSync("Migration failed", true);
+  }
+}
+
+/* ---------- Persistence + migration (local cache) ---------- */
 
 function loadAll() {
   // Sentences
@@ -112,13 +306,18 @@ function getOrCreateGroup(name) {
   const g = { id: uid(), name: trimmed, createdAt: Date.now(), playCount: 0 };
   state.groups.push(g);
   saveGroups();
+  remoteUpsertGroup(g);
   return g;
 }
 
 function deleteGroup(id) {
   state.groups = state.groups.filter((g) => g.id !== id);
+  const affected = [];
   for (const s of state.sentences) {
-    s.groupIds = (s.groupIds || []).filter((gid) => gid !== id);
+    if ((s.groupIds || []).includes(id)) {
+      s.groupIds = s.groupIds.filter((gid) => gid !== id);
+      affected.push(s);
+    }
   }
   if (state.settings.selectedGroupId === id) {
     state.settings.selectedGroupId = null;
@@ -126,6 +325,8 @@ function deleteGroup(id) {
   }
   saveGroups();
   saveSentences();
+  remoteDeleteGroup(id);
+  for (const s of affected) remoteUpsertSentence(s);
 }
 
 function renameGroup(id, newName) {
@@ -135,6 +336,7 @@ function renameGroup(id, newName) {
   if (!g) return;
   g.name = trimmed;
   saveGroups();
+  remoteUpsertGroup(g);
 }
 
 function sentencesInGroup(groupId) {
@@ -270,6 +472,7 @@ function handleSentenceAction(id, action) {
     if (confirm("Delete this sentence?")) {
       state.sentences = state.sentences.filter((x) => x.id !== id);
       saveSentences();
+      remoteDeleteSentence(id);
       renderGroupChips();
       renderList();
     }
@@ -336,23 +539,32 @@ addForm.addEventListener("submit", (e) => {
   if (!english || !korean) return;
   const groupIds = [...formGroupSelection];
 
+  let touched = null;
   if (state.editingId) {
     const s = state.sentences.find((x) => x.id === state.editingId);
     if (s) {
       s.english = english;
       s.korean = korean;
       s.groupIds = groupIds;
+      // Editing the text invalidates any cached audio.
+      s.audioPath = null;
+      s.audioVoice = null;
+      touched = s;
     }
   } else {
-    state.sentences.unshift({
+    touched = {
       id: uid(),
       english,
       korean,
       groupIds,
+      audioPath: null,
+      audioVoice: null,
       createdAt: Date.now(),
-    });
+    };
+    state.sentences.unshift(touched);
   }
   saveSentences();
+  if (touched) remoteUpsertSentence(touched);
   resetAddForm();
   renderGroupChips();
   renderList();
@@ -695,6 +907,7 @@ function incrementPlayCount() {
   if (!g) return;
   g.playCount = (g.playCount || 0) + 1;
   saveGroups();
+  remoteIncrementGroupPlay(id);
   renderPlayerPlayCount();
   renderGroupsManagement();
 }
@@ -953,7 +1166,7 @@ importCancelBtn.addEventListener("click", () => {
   importPreviewEl.hidden = true;
 });
 
-importConfirmBtn.addEventListener("click", () => {
+importConfirmBtn.addEventListener("click", async () => {
   if (!state.pendingImport) return;
   const { sentences } = state.pendingImport;
   let bulkGroupId = null;
@@ -967,7 +1180,7 @@ importConfirmBtn.addEventListener("click", () => {
     bulkGroupId = sel;
   }
 
-  let added = 0;
+  const newSentences = [];
   for (const item of sentences) {
     const groupIds = new Set();
     if (bulkGroupId) groupIds.add(bulkGroupId);
@@ -975,20 +1188,31 @@ importConfirmBtn.addEventListener("click", () => {
       const g = getOrCreateGroup(name);
       if (g) groupIds.add(g.id);
     }
-    state.sentences.push({
+    const s = {
       id: uid(),
       english: item.english,
       korean: item.korean,
       groupIds: [...groupIds],
+      audioPath: null,
+      audioVoice: null,
       createdAt: Date.now(),
-    });
-    added++;
+    };
+    state.sentences.push(s);
+    newSentences.push(s);
   }
   saveSentences();
   saveGroups();
+  showSync("Importing…");
+  try {
+    await remoteBulkInsert(newSentences, []);
+    showSync("");
+  } catch (err) {
+    console.error("import upload", err);
+    showSync("Import upload failed", true);
+  }
   state.pendingImport = null;
   importPreviewEl.hidden = true;
-  alert(`Imported ${added} sentence(s).`);
+  alert(`Imported ${newSentences.length} sentence(s).`);
   renderGroupChips();
   renderList();
   renderGroupsManagement();
@@ -1095,15 +1319,82 @@ function parseDelimited(text, delimiter) {
   return rows;
 }
 
-/* ---------- Settings: clear all ---------- */
+/* ---------- Settings: clear all + sign out ---------- */
 
-document.getElementById("clear-btn").addEventListener("click", () => {
-  if (confirm("Delete ALL sentences? Groups will be kept. This cannot be undone.")) {
-    state.sentences = [];
-    saveSentences();
-    renderGroupChips();
-    renderList();
-    renderGroupsManagement();
+document.getElementById("clear-btn").addEventListener("click", async () => {
+  if (!confirm("Delete ALL sentences? Groups will be kept. This cannot be undone.")) return;
+  state.sentences = [];
+  saveSentences();
+  renderGroupChips();
+  renderList();
+  renderGroupsManagement();
+  if (state.user) {
+    showSync("Deleting…");
+    const { error } = await sb.from("sentences").delete().eq("user_id", state.user.id);
+    if (error) {
+      console.error("clear all", error);
+      showSync("Delete failed", true);
+    } else {
+      showSync("");
+    }
+  }
+});
+
+const signoutBtn = document.getElementById("signout-btn");
+signoutBtn.addEventListener("click", async () => {
+  if (!confirm("Sign out? Your local cache will be cleared.")) return;
+  await sb.auth.signOut();
+  // Wipe local cache so the next user (or re-sign-in) starts clean.
+  localStorage.removeItem(STORAGE_KEY);
+  localStorage.removeItem(GROUPS_KEY);
+  localStorage.removeItem(MIGRATION_KEY);
+  location.reload();
+});
+
+/* ---------- Auth gate UI ---------- */
+
+const authGateEl = document.getElementById("auth-gate");
+const appHeaderEl = document.getElementById("app-header");
+const appMainEl = document.getElementById("app-main");
+const authForm = document.getElementById("auth-form");
+const authEmail = document.getElementById("auth-email");
+const authSubmit = document.getElementById("auth-submit");
+const authStatus = document.getElementById("auth-status");
+const accountEmailEl = document.getElementById("account-email");
+
+function showAuthGate() {
+  authGateEl.hidden = false;
+  appHeaderEl.hidden = true;
+  appMainEl.hidden = true;
+}
+
+function showApp(user) {
+  authGateEl.hidden = true;
+  appHeaderEl.hidden = false;
+  appMainEl.hidden = false;
+  if (accountEmailEl) {
+    accountEmailEl.textContent = `Signed in as ${user.email}`;
+  }
+}
+
+authForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const email = authEmail.value.trim();
+  if (!email) return;
+  authSubmit.disabled = true;
+  authStatus.className = "auth-status";
+  authStatus.textContent = "Sending…";
+  const { error } = await sb.auth.signInWithOtp({
+    email,
+    options: { emailRedirectTo: window.location.origin + window.location.pathname },
+  });
+  authSubmit.disabled = false;
+  if (error) {
+    authStatus.className = "auth-status error";
+    authStatus.textContent = error.message;
+  } else {
+    authStatus.className = "auth-status success";
+    authStatus.textContent = `Magic link sent to ${email}. Check your inbox and click the link on this device.`;
   }
 });
 
@@ -1115,16 +1406,65 @@ if ("serviceWorker" in navigator) {
   });
 }
 
-// Ask the browser to mark our storage as persistent so it won't evict it
-// under storage pressure. Browsers may grant or ignore; either way it's safe.
 if (navigator.storage && navigator.storage.persist) {
   navigator.storage.persist().catch(() => {});
 }
 
+/* ---------- Online/offline awareness ---------- */
+
+window.addEventListener("online", () => {
+  if (state.user) remoteSyncAll();
+});
+window.addEventListener("offline", () => {
+  showSync("Offline", true);
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && state.user && navigator.onLine) {
+    remoteSyncAll();
+  }
+});
+
 /* ---------- Init ---------- */
 
-loadAll();
-applySettingsToControls();
-renderGroupChips();
-renderList();
-renderGroupCheckboxes();
+async function init() {
+  // Render whatever's in the local cache immediately for fast first paint.
+  loadAll();
+  applySettingsToControls();
+  renderGroupChips();
+  renderList();
+  renderGroupCheckboxes();
+
+  // Determine session.
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) {
+    showAuthGate();
+    return;
+  }
+  state.user = session.user;
+  showApp(session.user);
+  await migrateLocalIfNeeded();
+  await remoteSyncAll();
+  renderGroupChips();
+  renderList();
+  renderGroupCheckboxes();
+  if (document.getElementById("view-play").classList.contains("active")) {
+    preparePlayer();
+  }
+}
+
+sb.auth.onAuthStateChange(async (event, session) => {
+  if (event === "SIGNED_IN" && session) {
+    state.user = session.user;
+    showApp(session.user);
+    await migrateLocalIfNeeded();
+    await remoteSyncAll();
+    renderGroupChips();
+    renderList();
+    renderGroupCheckboxes();
+  } else if (event === "SIGNED_OUT") {
+    state.user = null;
+    showAuthGate();
+  }
+});
+
+init();

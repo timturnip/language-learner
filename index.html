@@ -14,7 +14,24 @@
   <title>Korean Sentences</title>
 </head>
 <body>
-  <header class="app-header">
+  <!-- AUTH SCREEN (shown before sign-in) -->
+  <div class="auth-gate" id="auth-gate" hidden>
+    <div class="auth-card">
+      <h1 class="auth-title">한국어</h1>
+      <p class="auth-tagline">Your Korean sentences, anywhere.</p>
+      <form id="auth-form" class="auth-form">
+        <label>
+          <span>Email</span>
+          <input type="email" id="auth-email" required autocomplete="email" inputmode="email" />
+        </label>
+        <button type="submit" class="btn-primary" id="auth-submit">Send magic link</button>
+      </form>
+      <p class="auth-status" id="auth-status"></p>
+    </div>
+  </div>
+
+  <!-- APP SHELL (shown after sign-in) -->
+  <header class="app-header" id="app-header" hidden>
     <h1>한국어</h1>
     <nav class="tabs">
       <button class="tab active" data-view="list">List</button>
@@ -22,9 +39,10 @@
       <button class="tab" data-view="play">Play</button>
       <button class="tab" data-view="settings">⚙</button>
     </nav>
+    <div class="sync-indicator" id="sync-indicator" hidden></div>
   </header>
 
-  <main>
+  <main id="app-main" hidden>
     <!-- LIST VIEW -->
     <section class="view active" id="view-list">
       <div class="chips-row" id="group-chips"></div>
@@ -156,6 +174,10 @@
           </div>
         </div>
 
+        <h3>Account</h3>
+        <p class="hint" id="account-email"></p>
+        <button class="btn-secondary" id="signout-btn">Sign out</button>
+
         <h3>Danger zone</h3>
         <button id="clear-btn" class="btn-danger">Delete all sentences</button>
 
@@ -169,6 +191,7 @@
     </section>
   </main>
 
+  <script src="vendor/supabase.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

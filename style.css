@@ -582,3 +582,86 @@ textarea:focus, select:focus, input:focus {
   flex-direction: column;
   gap: 0.4rem;
 }
+
+/* AUTH GATE */
+.auth-gate {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 380px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.75rem 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.auth-title {
+  margin: 0;
+  font-size: 2rem;
+  text-align: center;
+  color: var(--accent);
+}
+
+.auth-tagline {
+  margin: 0 0 0.5rem;
+  text-align: center;
+  color: var(--fg-dim);
+  font-size: 0.95rem;
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.auth-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--fg-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.auth-form input[type="email"] {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 0.75rem;
+  border-radius: var(--radius);
+  font-size: 1.05rem;
+  font-family: inherit;
+}
+
+.auth-status {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--fg-dim);
+  min-height: 1.2em;
+  text-align: center;
+}
+
+.auth-status.error { color: var(--danger); }
+.auth-status.success { color: var(--accent); }
+
+/* Sync indicator */
+.sync-indicator {
+  position: absolute;
+  top: 0.7rem;
+  right: 1rem;
+  font-size: 0.75rem;
+  color: var(--fg-dim);
+}
+
+.sync-indicator.error { color: var(--danger); }
