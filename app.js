@@ -191,7 +191,21 @@ async function remoteBulkInsert(sentences, groups) {
 
 /* ---------- Audio generation + storage ---------- */
 
-const DEFAULT_GOOGLE_VOICE = "ko-KR-Neural2-A";
+const DEFAULT_GOOGLE_VOICE = "ko-KR-Chirp3-HD-Aoede";
+
+const GOOGLE_VOICES = [
+  { value: "ko-KR-Chirp3-HD-Aoede", label: "Chirp 3 HD — Aoede (female)" },
+  { value: "ko-KR-Chirp3-HD-Kore", label: "Chirp 3 HD — Kore (female)" },
+  { value: "ko-KR-Chirp3-HD-Leda", label: "Chirp 3 HD — Leda (female, warm)" },
+  { value: "ko-KR-Chirp3-HD-Sulafat", label: "Chirp 3 HD — Sulafat (female)" },
+  { value: "ko-KR-Chirp3-HD-Charon", label: "Chirp 3 HD — Charon (male)" },
+  { value: "ko-KR-Chirp3-HD-Puck", label: "Chirp 3 HD — Puck (male)" },
+  { value: "ko-KR-Chirp3-HD-Fenrir", label: "Chirp 3 HD — Fenrir (male, deep)" },
+  { value: "ko-KR-Chirp3-HD-Orus", label: "Chirp 3 HD — Orus (male)" },
+  { value: "ko-KR-Neural2-A", label: "Neural2 — A (female, older)" },
+  { value: "ko-KR-Neural2-B", label: "Neural2 — B (female, older)" },
+  { value: "ko-KR-Neural2-C", label: "Neural2 — C (male, older)" },
+];
 
 // In-memory signed URL cache so we don't re-sign on every play.
 const signedUrlCache = new Map(); // path -> { url, expiresAt }
@@ -444,6 +458,7 @@ function showView(name) {
   if (name === "play") preparePlayer();
   if (name === "settings") {
     populateVoiceSelect();
+    populateGoogleVoiceSelect();
     renderGroupsManagement();
   }
 }
@@ -1199,6 +1214,112 @@ function populateVoiceSelect() {
 voiceSelect.addEventListener("change", () => {
   state.settings.voiceURI = voiceSelect.value;
   saveSettings();
+});
+
+/* ---------- Settings: Google voice picker + preview + regenerate ---------- */
+
+const googleVoiceSelect = document.getElementById("google-voice-select");
+const previewVoiceBtn = document.getElementById("preview-voice-btn");
+const regenAudioBtn = document.getElementById("regen-audio-btn");
+
+function populateGoogleVoiceSelect() {
+  if (!googleVoiceSelect) return;
+  googleVoiceSelect.innerHTML = "";
+  for (const v of GOOGLE_VOICES) {
+    const opt = document.createElement("option");
+    opt.value = v.value;
+    opt.textContent = v.label;
+    googleVoiceSelect.appendChild(opt);
+  }
+  googleVoiceSelect.value = state.settings.googleVoice || DEFAULT_GOOGLE_VOICE;
+}
+
+googleVoiceSelect.addEventListener("change", () => {
+  state.settings.googleVoice = googleVoiceSelect.value;
+  saveSettings();
+});
+
+const PREVIEW_SAMPLE = "안녕하세요. 만나서 반갑습니다. 한국어 공부를 같이 시작합시다.";
+
+previewVoiceBtn.addEventListener("click", async () => {
+  cancelSpeech();
+  const voice = state.settings.googleVoice || DEFAULT_GOOGLE_VOICE;
+  previewVoiceBtn.disabled = true;
+  const original = previewVoiceBtn.textContent;
+  previewVoiceBtn.textContent = "Loading…";
+  let url = null;
+  try {
+    const { data: { session } } = await sb.auth.getSession();
+    if (!session) {
+      alert("Not signed in.");
+      return;
+    }
+    const ttsRes = await fetch("/api/tts", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({ text: PREVIEW_SAMPLE, voice }),
+    });
+    if (!ttsRes.ok) {
+      const err = await ttsRes.text().catch(() => "");
+      alert(`Preview failed (${ttsRes.status}): ${err.slice(0, 200)}`);
+      return;
+    }
+    const blob = await ttsRes.blob();
+    url = URL.createObjectURL(blob);
+    await playAudioUrl(url);
+  } catch (err) {
+    alert("Preview error: " + err.message);
+  } finally {
+    if (url) URL.revokeObjectURL(url);
+    previewVoiceBtn.disabled = false;
+    previewVoiceBtn.textContent = original;
+  }
+});
+
+regenAudioBtn.addEventListener("click", async () => {
+  if (!state.user) return;
+  const voice = state.settings.googleVoice || DEFAULT_GOOGLE_VOICE;
+  const count = state.sentences.length;
+  if (!count) {
+    alert("No sentences to regenerate.");
+    return;
+  }
+  if (!confirm(
+    `Regenerate audio for all ${count} sentence${count === 1 ? "" : "s"} using "${voice}"?\n\n` +
+    `This will overwrite existing audio and may take several minutes. ` +
+    `Cost is ~$0.0015 per sentence at Chirp 3 HD pricing.`
+  )) return;
+
+  regenAudioBtn.disabled = true;
+  const originalText = regenAudioBtn.textContent;
+  showSync("Regenerating audio…");
+
+  // Clear local audio refs so generateAudioFor() runs for each sentence.
+  for (const s of state.sentences) {
+    s.audioPath = null;
+    s.audioVoice = null;
+  }
+  saveSentences();
+  signedUrlCache.clear();
+
+  // Clear remote audio_path so old MP3s aren't served while regenerating.
+  await sb
+    .from("sentences")
+    .update({ audio_path: null, audio_voice: null })
+    .eq("user_id", state.user.id);
+
+  let done = 0;
+  const list = state.sentences.slice();
+  await queueAudioGeneration(list, 4);
+  done = list.filter((s) => s.audioPath).length;
+
+  showSync("");
+  regenAudioBtn.disabled = false;
+  regenAudioBtn.textContent = originalText;
+  alert(`Regenerated ${done} of ${count} sentence(s).`);
 });
 
 /* ---------- Settings: groups management ---------- */

@@ -10,7 +10,7 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 const GOOGLE_TTS_API_KEY = process.env.GOOGLE_TTS_API_KEY;
 
-const DEFAULT_VOICE = "ko-KR-Neural2-A";
+const DEFAULT_VOICE = "ko-KR-Chirp3-HD-Aoede";
 const DEFAULT_LANG = "ko-KR";
 const MAX_INPUT_CHARS = 2000;
 

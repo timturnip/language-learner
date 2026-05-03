@@ -144,9 +144,20 @@
     <!-- SETTINGS VIEW -->
     <section class="view" id="view-settings">
       <div class="settings">
-        <h3>Voice</h3>
+        <h3>Audio voice (Google)</h3>
         <label>
-          <span class="section-label">Korean voice</span>
+          <span class="section-label">Voice for cached audio</span>
+          <select id="google-voice-select"></select>
+        </label>
+        <div class="settings-row">
+          <button class="btn-secondary" id="preview-voice-btn">▶ Preview voice</button>
+          <button class="btn-secondary" id="regen-audio-btn">Regenerate all audio</button>
+        </div>
+        <p class="hint">Chirp 3 HD voices are Google's newest, most natural. Changing voice only affects newly added sentences. Use "Regenerate" to re-render existing sentences.</p>
+
+        <h3>Fallback voice (on-device)</h3>
+        <label>
+          <span class="section-label">Used when no cached audio is available</span>
           <select id="voice-select"></select>
         </label>
         <p class="hint" id="voice-hint"></p>
