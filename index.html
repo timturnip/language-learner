@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b1220" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Korean" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" type="image/svg+xml" href="icon.svg" />
+  <link rel="apple-touch-icon" href="icon.svg" />
+  <link rel="stylesheet" href="style.css" />
+  <title>Korean Sentences</title>
+</head>
+<body>
+  <header class="app-header">
+    <h1>한국어</h1>
+    <nav class="tabs">
+      <button class="tab active" data-view="list">List</button>
+      <button class="tab" data-view="add">Add</button>
+      <button class="tab" data-view="play">Play</button>
+      <button class="tab" data-view="settings">⚙</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- LIST VIEW -->
+    <section class="view active" id="view-list">
+      <div class="chips-row" id="group-chips"></div>
+      <div class="list-toolbar">
+        <input type="search" id="search" placeholder="Search…" />
+        <span class="count" id="count">0</span>
+      </div>
+      <ul class="sentence-list" id="sentence-list"></ul>
+      <p class="empty" id="empty-state">No sentences yet. Tap <strong>Add</strong> to create one, or import a file from <strong>⚙</strong>.</p>
+    </section>
+
+    <!-- ADD VIEW -->
+    <section class="view" id="view-add">
+      <form id="add-form" class="add-form">
+        <label>
+          <span>English</span>
+          <textarea id="input-english" rows="2" placeholder="I'd like a coffee, please." required></textarea>
+        </label>
+        <label>
+          <span>Korean</span>
+          <textarea id="input-korean" rows="2" lang="ko" placeholder="커피 한 잔 주세요." required></textarea>
+        </label>
+        <div class="form-section">
+          <span class="section-label">Groups</span>
+          <div class="group-checkboxes" id="group-checkboxes"></div>
+        </div>
+        <div class="add-actions">
+          <button type="button" class="btn-secondary" id="preview-korean">▶ Preview</button>
+          <button type="submit" class="btn-primary">Save</button>
+        </div>
+        <p class="edit-banner" id="edit-banner" hidden>Editing existing sentence. <button type="button" id="cancel-edit">Cancel</button></p>
+      </form>
+    </section>
+
+    <!-- PLAY VIEW -->
+    <section class="view" id="view-play">
+      <div class="player">
+        <div class="player-meta">
+          <label class="player-group-label">
+            Group
+            <select id="player-group"></select>
+          </label>
+          <span class="player-playcount" id="player-playcount"></span>
+        </div>
+        <div class="player-display">
+          <p class="player-en" id="player-en">—</p>
+          <p class="player-ko" id="player-ko" lang="ko">—</p>
+          <p class="player-progress" id="player-progress">0 / 0</p>
+        </div>
+        <div class="player-controls">
+          <button id="btn-prev" aria-label="Previous">⏮</button>
+          <button id="btn-playpause" class="primary" aria-label="Play/Pause">▶</button>
+          <button id="btn-next" aria-label="Next">⏭</button>
+        </div>
+        <div class="player-options">
+          <div class="reps-row">
+            <label class="reps">
+              English × <input type="number" id="english-reps" min="0" max="10" step="1" />
+            </label>
+            <label class="reps">
+              Korean × <input type="number" id="korean-reps" min="1" max="10" step="1" />
+            </label>
+          </div>
+          <label>
+            Order
+            <select id="play-order">
+              <option value="en-first">English first</option>
+              <option value="ko-first">Korean first</option>
+            </select>
+          </label>
+          <label>
+            Speed <span id="speed-label">1.0x</span>
+            <input type="range" id="speed" min="0.5" max="1.3" step="0.05" value="1.0" />
+          </label>
+          <label>
+            Gap between reps <span id="rep-gap-label">0.5s</span>
+            <input type="range" id="rep-gap" min="0" max="3" step="0.1" value="0.5" />
+          </label>
+          <label>
+            Gap between sentences <span id="sentence-gap-label">1.5s</span>
+            <input type="range" id="sentence-gap" min="0" max="6" step="0.25" value="1.5" />
+          </label>
+          <label class="checkbox">
+            <input type="checkbox" id="loop" /> Loop
+          </label>
+          <label class="checkbox">
+            <input type="checkbox" id="shuffle" /> Shuffle
+          </label>
+        </div>
+      </div>
+    </section>
+
+    <!-- SETTINGS VIEW -->
+    <section class="view" id="view-settings">
+      <div class="settings">
+        <h3>Voice</h3>
+        <label>
+          <span class="section-label">Korean voice</span>
+          <select id="voice-select"></select>
+        </label>
+        <p class="hint" id="voice-hint"></p>
+
+        <h3>Groups</h3>
+        <div class="groups-list" id="groups-list"></div>
+        <button class="btn-secondary" id="new-group-btn">+ New group</button>
+
+        <h3>Import &amp; Export</h3>
+        <div class="settings-row">
+          <button id="export-btn" class="btn-secondary">Export JSON</button>
+          <button id="import-btn" class="btn-secondary">Import file…</button>
+          <input type="file" id="import-file" accept=".json,.csv,.tsv,.txt,application/json,text/csv,text/tab-separated-values,text/plain" hidden />
+        </div>
+        <p class="hint">
+          Accepts <strong>JSON</strong> (from Export) or <strong>CSV/TSV/TXT</strong>.
+          Tabular formats: one sentence per line as <code>english,korean</code> or
+          <code>english,korean,group</code>. Multiple groups separated by <code>|</code>.
+          A header row (e.g. <code>english,korean</code>) is auto-detected.
+        </p>
+        <div class="import-preview" id="import-preview" hidden>
+          <p id="import-summary"></p>
+          <label>
+            <span class="section-label">Add all to group</span>
+            <select id="import-group"></select>
+          </label>
+          <p class="hint" id="import-group-hint">If the file has a group column, that takes precedence per row.</p>
+          <div class="settings-row">
+            <button class="btn-secondary" id="import-cancel">Cancel</button>
+            <button class="btn-primary" id="import-confirm">Import</button>
+          </div>
+        </div>
+
+        <h3>Danger zone</h3>
+        <button id="clear-btn" class="btn-danger">Delete all sentences</button>
+
+        <h3>About</h3>
+        <p class="hint">
+          Works offline once loaded. Audio uses your device's built-in Korean voice.
+          On iOS, audio pauses when the screen locks — the app requests a wake lock
+          during playback to keep the screen awake.
+        </p>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
