@@ -1358,9 +1358,16 @@ const appHeaderEl = document.getElementById("app-header");
 const appMainEl = document.getElementById("app-main");
 const authForm = document.getElementById("auth-form");
 const authEmail = document.getElementById("auth-email");
+const authCode = document.getElementById("auth-code");
+const authEmailLabel = document.getElementById("auth-email-label");
+const authCodeLabel = document.getElementById("auth-code-label");
 const authSubmit = document.getElementById("auth-submit");
+const authRestart = document.getElementById("auth-restart");
 const authStatus = document.getElementById("auth-status");
 const accountEmailEl = document.getElementById("account-email");
+
+let authStep = "email";       // "email" | "code"
+let authPendingEmail = null;
 
 function showAuthGate() {
   authGateEl.hidden = false;
@@ -1377,26 +1384,88 @@ function showApp(user) {
   }
 }
 
+function setAuthStep(step) {
+  authStep = step;
+  if (step === "email") {
+    authEmailLabel.hidden = false;
+    authCodeLabel.hidden = true;
+    authRestart.hidden = true;
+    authSubmit.textContent = "Send code";
+    authCode.value = "";
+  } else {
+    authEmailLabel.hidden = true;
+    authCodeLabel.hidden = false;
+    authRestart.hidden = false;
+    authSubmit.textContent = "Verify code";
+    setTimeout(() => authCode.focus(), 50);
+  }
+}
+
+authRestart.addEventListener("click", () => {
+  authPendingEmail = null;
+  authStatus.className = "auth-status";
+  authStatus.textContent = "";
+  setAuthStep("email");
+});
+
 authForm.addEventListener("submit", async (e) => {
   e.preventDefault();
-  const email = authEmail.value.trim();
-  if (!email) return;
+
+  if (authStep === "email") {
+    const email = authEmail.value.trim();
+    if (!email) return;
+    authSubmit.disabled = true;
+    authStatus.className = "auth-status";
+    authStatus.textContent = "Sending…";
+    const { error } = await sb.auth.signInWithOtp({
+      email,
+      options: { shouldCreateUser: true },
+    });
+    authSubmit.disabled = false;
+    if (error) {
+      authStatus.className = "auth-status error";
+      authStatus.textContent = error.message;
+      return;
+    }
+    authPendingEmail = email;
+    setAuthStep("code");
+    authStatus.className = "auth-status success";
+    authStatus.textContent = `Code sent to ${email}. Check your inbox.`;
+    return;
+  }
+
+  // Code step
+  const token = authCode.value.trim();
+  if (!token) return;
   authSubmit.disabled = true;
   authStatus.className = "auth-status";
-  authStatus.textContent = "Sending…";
-  const { error } = await sb.auth.signInWithOtp({
-    email,
-    options: { emailRedirectTo: window.location.origin + window.location.pathname },
+  authStatus.textContent = "Verifying…";
+  const { error } = await sb.auth.verifyOtp({
+    email: authPendingEmail,
+    token,
+    type: "email",
   });
   authSubmit.disabled = false;
   if (error) {
     authStatus.className = "auth-status error";
     authStatus.textContent = error.message;
-  } else {
-    authStatus.className = "auth-status success";
-    authStatus.textContent = `Magic link sent to ${email}. Check your inbox and click the link on this device.`;
+    return;
   }
+  // Success: onAuthStateChange will swap to the app shell.
+  authStatus.textContent = "";
 });
+
+// Surface any error returned in the URL hash (e.g. expired link from previous attempt).
+(function showHashError() {
+  if (!location.hash) return;
+  const params = new URLSearchParams(location.hash.slice(1));
+  const desc = params.get("error_description") || params.get("error");
+  if (desc) {
+    authStatus.className = "auth-status error";
+    authStatus.textContent = desc.replace(/\+/g, " ");
+    history.replaceState(null, "", location.pathname + location.search);
+  }
+})();
 
 /* ---------- Service worker + persistent storage ---------- */
 

@@ -20,11 +20,17 @@
       <h1 class="auth-title">한국어</h1>
       <p class="auth-tagline">Your Korean sentences, anywhere.</p>
       <form id="auth-form" class="auth-form">
-        <label>
+        <label id="auth-email-label">
           <span>Email</span>
           <input type="email" id="auth-email" required autocomplete="email" inputmode="email" />
         </label>
-        <button type="submit" class="btn-primary" id="auth-submit">Send magic link</button>
+        <label id="auth-code-label" hidden>
+          <span>6-digit code from email</span>
+          <input type="text" id="auth-code" inputmode="numeric" autocomplete="one-time-code"
+                 pattern="[0-9]*" maxlength="6" />
+        </label>
+        <button type="submit" class="btn-primary" id="auth-submit">Send code</button>
+        <button type="button" class="btn-secondary" id="auth-restart" hidden>Use a different email</button>
       </form>
       <p class="auth-status" id="auth-status"></p>
     </div>
