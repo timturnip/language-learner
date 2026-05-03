@@ -1,4 +1,4 @@
-const CACHE = "korean-app-v4";
+const CACHE = "korean-app-v5";
 const ASSETS = [
   "./",
   "./index.html",

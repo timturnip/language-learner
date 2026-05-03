@@ -189,6 +189,90 @@ async function remoteBulkInsert(sentences, groups) {
   }
 }
 
+/* ---------- Audio generation + storage ---------- */
+
+const DEFAULT_GOOGLE_VOICE = "ko-KR-Neural2-A";
+
+// In-memory signed URL cache so we don't re-sign on every play.
+const signedUrlCache = new Map(); // path -> { url, expiresAt }
+
+async function getSignedAudioUrl(path) {
+  const cached = signedUrlCache.get(path);
+  if (cached && cached.expiresAt > Date.now() + 60_000) return cached.url;
+  const { data, error } = await sb.storage.from("audio").createSignedUrl(path, 3600);
+  if (error || !data?.signedUrl) {
+    console.error("signed url", error);
+    return null;
+  }
+  signedUrlCache.set(path, {
+    url: data.signedUrl,
+    expiresAt: Date.now() + 3600 * 1000,
+  });
+  return data.signedUrl;
+}
+
+// Track in-flight generations so we don't double-fire for the same sentence.
+const audioGenInFlight = new Set();
+
+async function generateAudioFor(sentence) {
+  if (!state.user || !sentence?.id || !sentence.korean) return;
+  if (audioGenInFlight.has(sentence.id)) return;
+  if (!navigator.onLine) return;
+
+  audioGenInFlight.add(sentence.id);
+  try {
+    const { data: { session } } = await sb.auth.getSession();
+    if (!session) return;
+    const voice = state.settings.googleVoice || DEFAULT_GOOGLE_VOICE;
+
+    const ttsRes = await fetch("/api/tts", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({ text: sentence.korean, voice }),
+    });
+    if (!ttsRes.ok) {
+      const err = await ttsRes.text().catch(() => "");
+      console.error("tts failed", ttsRes.status, err);
+      return;
+    }
+    const blob = await ttsRes.blob();
+    const path = `${state.user.id}/${sentence.id}.mp3`;
+    const upRes = await sb.storage.from("audio").upload(path, blob, {
+      upsert: true,
+      contentType: "audio/mpeg",
+    });
+    if (upRes.error) {
+      console.error("storage upload", upRes.error);
+      return;
+    }
+    sentence.audioPath = path;
+    sentence.audioVoice = voice;
+
+    const { error: updErr } = await sb
+      .from("sentences")
+      .update({ audio_path: path, audio_voice: voice })
+      .eq("id", sentence.id);
+    if (updErr) console.error("audio_path update", updErr);
+
+    saveSentences();
+    // If the player is showing this sentence, refresh its display.
+    if (
+      state.player.queue[state.player.index]?.id === sentence.id &&
+      document.getElementById("view-play").classList.contains("active")
+    ) {
+      // Pre-warm the signed URL so first play is instant.
+      getSignedAudioUrl(path);
+    }
+  } catch (err) {
+    console.error("audio gen error", err);
+  } finally {
+    audioGenInFlight.delete(sentence.id);
+  }
+}
+
 /* ---------- One-time migration of pre-Supabase local data ---------- */
 
 async function migrateLocalIfNeeded() {
@@ -465,7 +549,7 @@ function handleSentenceAction(id, action) {
   if (!s) return;
   if (action === "speak") {
     cancelSpeech();
-    speakKorean(s.korean);
+    playKorean(s);
   } else if (action === "edit") {
     startEdit(s);
   } else if (action === "delete") {
@@ -564,7 +648,10 @@ addForm.addEventListener("submit", (e) => {
     state.sentences.unshift(touched);
   }
   saveSentences();
-  if (touched) remoteUpsertSentence(touched);
+  if (touched) {
+    remoteUpsertSentence(touched);
+    generateAudioFor(touched);
+  }
   resetAddForm();
   renderGroupChips();
   renderList();
@@ -575,7 +662,7 @@ previewBtn.addEventListener("click", () => {
   const text = koInput.value.trim();
   if (text) {
     cancelSpeech();
-    speakKorean(text);
+    playKorean(text);
   }
 });
 
@@ -654,8 +741,48 @@ function speak(text, lang, { rate = 1.0 } = {}) {
   });
 }
 
-function speakKorean(text) {
-  return speak(text, "ko-KR", { rate: state.settings.speed });
+const playerAudioEl = document.getElementById("player-audio");
+
+function playAudioUrl(url) {
+  return new Promise((resolve) => {
+    const onEnd = () => { cleanup(); resolve(); };
+    const onError = (e) => { cleanup(); console.warn("audio error", e); resolve(); };
+    function cleanup() {
+      playerAudioEl.removeEventListener("ended", onEnd);
+      playerAudioEl.removeEventListener("error", onError);
+    }
+    playerAudioEl.addEventListener("ended", onEnd);
+    playerAudioEl.addEventListener("error", onError);
+    playerAudioEl.src = url;
+    try { playerAudioEl.playbackRate = state.settings.speed; } catch {}
+    const p = playerAudioEl.play();
+    if (p && typeof p.catch === "function") p.catch(onError);
+  });
+}
+
+function stopAudio() {
+  try {
+    playerAudioEl.pause();
+    playerAudioEl.removeAttribute("src");
+    playerAudioEl.load();
+  } catch {}
+}
+
+// Speak Korean: prefer cached MP3, fall back to on-device TTS.
+// Accepts either a sentence object or a raw string (for the textarea preview).
+async function playKorean(sentenceOrText) {
+  if (typeof sentenceOrText === "string") {
+    return speak(sentenceOrText, "ko-KR", { rate: state.settings.speed });
+  }
+  const s = sentenceOrText;
+  if (s.audioPath) {
+    const url = await getSignedAudioUrl(s.audioPath);
+    if (url) return playAudioUrl(url);
+  } else if (state.user && navigator.onLine) {
+    // Lazy backfill: kick off generation for next time.
+    generateAudioFor(s);
+  }
+  return speak(s.korean, "ko-KR", { rate: state.settings.speed });
 }
 
 function speakEnglish(text) {
@@ -664,6 +791,7 @@ function speakEnglish(text) {
 
 function cancelSpeech() {
   if ("speechSynthesis" in window) speechSynthesis.cancel();
+  stopAudio();
 }
 
 /* ---------- Player ---------- */
@@ -828,6 +956,9 @@ function renderPlayerCurrent() {
   playerEn.textContent = s.english;
   playerKo.textContent = s.korean;
   playerProgress.textContent = `${state.player.index + 1} / ${state.player.queue.length}`;
+  if (state.player.playing && typeof updateMediaSessionMetadata === "function") {
+    updateMediaSessionMetadata();
+  }
 }
 
 function setSpeakingHighlight(which) {
@@ -889,7 +1020,7 @@ async function playSentenceSegments(s) {
     const seg = segments[i];
     if (!state.player.playing) return;
     setSpeakingHighlight(seg.lang);
-    if (seg.lang === "ko") await speakKorean(seg.text);
+    if (seg.lang === "ko") await playKorean(s);
     else await speakEnglish(seg.text);
     setSpeakingHighlight(null);
     if (!state.player.playing) return;
@@ -958,6 +1089,8 @@ function startPlayback() {
   state.player.playing = true;
   btnPlayPause.textContent = "⏸";
   requestWakeLock();
+  setupMediaSession();
+  updateMediaSessionMetadata();
   playLoop();
 }
 
@@ -968,6 +1101,9 @@ function stopPlayback() {
   setSpeakingHighlight(null);
   btnPlayPause.textContent = "▶";
   releaseWakeLock();
+  if ("mediaSession" in navigator) {
+    navigator.mediaSession.playbackState = "paused";
+  }
 }
 
 btnPlayPause.addEventListener("click", () => {
@@ -975,19 +1111,59 @@ btnPlayPause.addEventListener("click", () => {
   else startPlayback();
 });
 
-btnPrev.addEventListener("click", () => {
+function gotoPrev() {
   cancelSpeech();
   abortSleep();
   state.player.index = Math.max(0, state.player.index - 1);
   renderPlayerCurrent();
-});
+  updateMediaSessionMetadata();
+}
 
-btnNext.addEventListener("click", () => {
+function gotoNext() {
   cancelSpeech();
   abortSleep();
   state.player.index = Math.min(state.player.queue.length - 1, state.player.index + 1);
   renderPlayerCurrent();
-});
+  updateMediaSessionMetadata();
+}
+
+btnPrev.addEventListener("click", gotoPrev);
+btnNext.addEventListener("click", gotoNext);
+
+/* ---------- Media Session API (lock screen / CarPlay controls) ---------- */
+
+let mediaSessionWired = false;
+
+function setupMediaSession() {
+  if (!("mediaSession" in navigator) || mediaSessionWired) return;
+  navigator.mediaSession.setActionHandler("play", () => {
+    if (!state.player.playing) startPlayback();
+  });
+  navigator.mediaSession.setActionHandler("pause", () => {
+    if (state.player.playing) stopPlayback();
+  });
+  navigator.mediaSession.setActionHandler("previoustrack", gotoPrev);
+  navigator.mediaSession.setActionHandler("nexttrack", gotoNext);
+  mediaSessionWired = true;
+}
+
+function updateMediaSessionMetadata() {
+  if (!("mediaSession" in navigator)) return;
+  const s = state.player.queue[state.player.index];
+  if (!s) {
+    navigator.mediaSession.metadata = null;
+    return;
+  }
+  const groupName = state.player.sessionGroupId
+    ? (state.groups.find((g) => g.id === state.player.sessionGroupId)?.name || "")
+    : "All sentences";
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: s.korean,
+    artist: s.english,
+    album: groupName,
+  });
+  navigator.mediaSession.playbackState = state.player.playing ? "playing" : "paused";
+}
 
 /* ---------- Settings: voice ---------- */
 
@@ -1212,11 +1388,27 @@ importConfirmBtn.addEventListener("click", async () => {
   }
   state.pendingImport = null;
   importPreviewEl.hidden = true;
-  alert(`Imported ${newSentences.length} sentence(s).`);
+  alert(`Imported ${newSentences.length} sentence(s). Audio is being generated in the background.`);
   renderGroupChips();
   renderList();
   renderGroupsManagement();
+
+  // Generate audio for each new sentence with a small concurrency cap so we
+  // don't hammer the TTS API when importing a large batch.
+  queueAudioGeneration(newSentences);
 });
+
+async function queueAudioGeneration(sentences, concurrency = 4) {
+  if (!sentences.length) return;
+  let i = 0;
+  const workers = Array.from({ length: Math.min(concurrency, sentences.length) }, async () => {
+    while (i < sentences.length) {
+      const s = sentences[i++];
+      await generateAudioFor(s);
+    }
+  });
+  await Promise.all(workers);
+}
 
 /* ---------- Import parsers ---------- */
 
