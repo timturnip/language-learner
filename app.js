@@ -251,8 +251,10 @@ async function generateAudioFor(sentence) {
     if (!session) throw new Error("no session");
     const voice = state.settings.googleVoice || DEFAULT_GOOGLE_VOICE;
 
+    // Chirp 3 HD voices have ~30-60s cold start on the first call to a
+    // given voice. Subsequent calls are fast (~2s). Generous client timeout.
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 45_000);
+    const timeoutId = setTimeout(() => controller.abort(), 75_000);
     let ttsRes;
     try {
       ttsRes = await fetch("/api/tts", {
@@ -1342,7 +1344,9 @@ regenAudioBtn.addEventListener("click", async () => {
     .eq("user_id", state.user.id);
 
   const list = state.sentences.slice();
-  const result = await queueAudioGeneration(list, 4);
+  const result = await queueAudioGeneration(list, 4, ({ done, total }) => {
+    showSync(`Regenerating ${done} / ${total}…`);
+  });
 
   showSync("");
   regenAudioBtn.disabled = false;
@@ -1549,27 +1553,49 @@ importConfirmBtn.addEventListener("click", async () => {
   renderGroupsManagement();
 
   // Generate audio for each new sentence with a small concurrency cap so we
-  // don't hammer the TTS API when importing a large batch.
-  queueAudioGeneration(newSentences);
+  // don't hammer the TTS API when importing a large batch. First call
+  // serially to avoid parallel cold-starts.
+  queueAudioGeneration(newSentences, 4, ({ done, total }) => {
+    showSync(`Generating audio ${done} / ${total}…`);
+  }).then(() => {
+    showSync("");
+  });
 });
 
-async function queueAudioGeneration(sentences, concurrency = 4) {
+async function queueAudioGeneration(sentences, concurrency = 4, onProgress) {
   if (!sentences.length) return { ok: 0, failed: 0, firstError: null };
   let i = 0;
   let okCount = 0;
   let failedCount = 0;
   let firstError = null;
-  const workers = Array.from({ length: Math.min(concurrency, sentences.length) }, async () => {
-    while (i < sentences.length) {
-      const s = sentences[i++];
-      const r = await generateAudioFor(s);
-      if (r?.ok) okCount++;
-      else {
-        failedCount++;
-        if (!firstError && r?.error) firstError = r.error;
+
+  const recordResult = (r) => {
+    if (r?.ok) okCount++;
+    else {
+      failedCount++;
+      if (!firstError && r?.error) firstError = r.error;
+    }
+    if (onProgress) onProgress({ done: okCount + failedCount, total: sentences.length, ok: okCount, failed: failedCount });
+  };
+
+  // Warm-up: run the very first call serially so the Chirp 3 HD model is
+  // primed on Google's side before we fan out. Cold starts are 30-60s; warm
+  // calls are 1-3s. Without this, parallel cold starts compound.
+  if (sentences.length > 0) {
+    const r = await generateAudioFor(sentences[i++]);
+    recordResult(r);
+  }
+
+  const workers = Array.from(
+    { length: Math.min(concurrency, Math.max(0, sentences.length - 1)) },
+    async () => {
+      while (i < sentences.length) {
+        const s = sentences[i++];
+        const r = await generateAudioFor(s);
+        recordResult(r);
       }
     }
-  });
+  );
   await Promise.all(workers);
   return { ok: okCount, failed: failedCount, firstError };
 }

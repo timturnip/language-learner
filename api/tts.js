@@ -14,6 +14,10 @@ const DEFAULT_VOICE = "ko-KR-Chirp3-HD-Aoede";
 const DEFAULT_LANG = "ko-KR";
 const MAX_INPUT_CHARS = 2000;
 
+// Chirp 3 HD voices can have a 30-60s cold start. Allow up to 60s.
+// (Hobby plan max is 60s; Pro/Enterprise can go higher.)
+export const config = { maxDuration: 60 };
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
