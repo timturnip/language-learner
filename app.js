@@ -118,14 +118,26 @@ function groupToRow(g) {
   };
 }
 
+function withTimeout(promise, ms, label = "operation") {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 async function remoteSyncAll() {
   if (!state.user) return;
   showSync("Syncing…");
   try {
-    const [sentencesRes, groupsRes] = await Promise.all([
-      sb.from("sentences").select("*").order("created_at", { ascending: false }),
-      sb.from("groups").select("*").order("name"),
-    ]);
+    const [sentencesRes, groupsRes] = await withTimeout(
+      Promise.all([
+        sb.from("sentences").select("*").order("created_at", { ascending: false }),
+        sb.from("groups").select("*").order("name"),
+      ]),
+      20_000,
+      "Supabase sync"
+    );
     if (sentencesRes.error) throw sentencesRes.error;
     if (groupsRes.error) throw groupsRes.error;
     state.sentences = sentencesRes.data.map(rowToSentence);
@@ -135,7 +147,7 @@ async function remoteSyncAll() {
     showSync("");
   } catch (err) {
     console.error("sync error", err);
-    showSync(navigator.onLine ? "Sync error" : "Offline", true);
+    showSync(navigator.onLine ? `Sync error: ${err.message || "unknown"}` : "Offline", true);
   }
 }
 
@@ -236,21 +248,30 @@ async function generateAudioFor(sentence) {
   audioGenInFlight.add(sentence.id);
   try {
     const { data: { session } } = await sb.auth.getSession();
-    if (!session) return;
+    if (!session) throw new Error("no session");
     const voice = state.settings.googleVoice || DEFAULT_GOOGLE_VOICE;
 
-    const ttsRes = await fetch("/api/tts", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${session.access_token}`,
-      },
-      body: JSON.stringify({ text: sentence.korean, voice }),
-    });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 45_000);
+    let ttsRes;
+    try {
+      ttsRes = await fetch("/api/tts", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({ text: sentence.korean, voice }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
     if (!ttsRes.ok) {
       const err = await ttsRes.text().catch(() => "");
       console.error("tts failed", ttsRes.status, err);
-      return;
+      throw new Error(`TTS ${ttsRes.status}: ${err.slice(0, 200) || ttsRes.statusText}`);
     }
     const blob = await ttsRes.blob();
     const path = `${state.user.id}/${sentence.id}.mp3`;
@@ -260,7 +281,7 @@ async function generateAudioFor(sentence) {
     });
     if (upRes.error) {
       console.error("storage upload", upRes.error);
-      return;
+      throw new Error(`Upload: ${upRes.error.message}`);
     }
     sentence.audioPath = path;
     sentence.audioVoice = voice;
@@ -269,19 +290,18 @@ async function generateAudioFor(sentence) {
       .from("sentences")
       .update({ audio_path: path, audio_voice: voice })
       .eq("id", sentence.id);
-    if (updErr) console.error("audio_path update", updErr);
+    if (updErr) {
+      console.error("audio_path update", updErr);
+      // Don't throw; the audio is uploaded, only the row update failed.
+    }
 
     saveSentences();
-    // If the player is showing this sentence, refresh its display.
-    if (
-      state.player.queue[state.player.index]?.id === sentence.id &&
-      document.getElementById("view-play").classList.contains("active")
-    ) {
-      // Pre-warm the signed URL so first play is instant.
-      getSignedAudioUrl(path);
-    }
+    // Bust any cached signed URL for this path so playback fetches the new MP3.
+    signedUrlCache.delete(path);
+    return { ok: true };
   } catch (err) {
     console.error("audio gen error", err);
+    return { ok: false, error: err.message || String(err) };
   } finally {
     audioGenInFlight.delete(sentence.id);
   }
@@ -760,18 +780,22 @@ const playerAudioEl = document.getElementById("player-audio");
 
 function playAudioUrl(url) {
   return new Promise((resolve) => {
-    const onEnd = () => { cleanup(); resolve(); };
-    const onError = (e) => { cleanup(); console.warn("audio error", e); resolve(); };
+    let started = false;
+    const onPlaying = () => { started = true; };
+    const onEnd = () => { cleanup(); resolve({ ok: started }); };
+    const onError = (e) => { cleanup(); console.warn("audio error", e); resolve({ ok: false }); };
     function cleanup() {
       playerAudioEl.removeEventListener("ended", onEnd);
       playerAudioEl.removeEventListener("error", onError);
+      playerAudioEl.removeEventListener("playing", onPlaying);
     }
     playerAudioEl.addEventListener("ended", onEnd);
     playerAudioEl.addEventListener("error", onError);
+    playerAudioEl.addEventListener("playing", onPlaying);
     playerAudioEl.src = url;
     try { playerAudioEl.playbackRate = state.settings.speed; } catch {}
     const p = playerAudioEl.play();
-    if (p && typeof p.catch === "function") p.catch(onError);
+    if (p && typeof p.catch === "function") p.catch(() => onError());
   });
 }
 
@@ -792,7 +816,13 @@ async function playKorean(sentenceOrText) {
   const s = sentenceOrText;
   if (s.audioPath) {
     const url = await getSignedAudioUrl(s.audioPath);
-    if (url) return playAudioUrl(url);
+    if (url) {
+      const r = await playAudioUrl(url);
+      if (r?.ok) return;
+      // Audio failed to play; bust cache and fall through to speech synth.
+      signedUrlCache.delete(s.audioPath);
+      console.warn("audio playback failed, falling back to speech synth", s.id);
+    }
   } else if (state.user && navigator.onLine) {
     // Lazy backfill: kick off generation for next time.
     generateAudioFor(s);
@@ -1311,15 +1341,19 @@ regenAudioBtn.addEventListener("click", async () => {
     .update({ audio_path: null, audio_voice: null })
     .eq("user_id", state.user.id);
 
-  let done = 0;
   const list = state.sentences.slice();
-  await queueAudioGeneration(list, 4);
-  done = list.filter((s) => s.audioPath).length;
+  const result = await queueAudioGeneration(list, 4);
 
   showSync("");
   regenAudioBtn.disabled = false;
   regenAudioBtn.textContent = originalText;
-  alert(`Regenerated ${done} of ${count} sentence(s).`);
+
+  let msg = `Regenerated ${result.ok} of ${count} sentence(s).`;
+  if (result.failed > 0) {
+    msg += `\n\n${result.failed} failed. First error:\n${result.firstError || "unknown"}\n\n` +
+           `Check the browser console for details. If it's a "voice not found" or "permission" error, try a different voice (e.g. ko-KR-Neural2-A) and click Regenerate again.`;
+  }
+  alert(msg);
 });
 
 /* ---------- Settings: groups management ---------- */
@@ -1520,15 +1554,24 @@ importConfirmBtn.addEventListener("click", async () => {
 });
 
 async function queueAudioGeneration(sentences, concurrency = 4) {
-  if (!sentences.length) return;
+  if (!sentences.length) return { ok: 0, failed: 0, firstError: null };
   let i = 0;
+  let okCount = 0;
+  let failedCount = 0;
+  let firstError = null;
   const workers = Array.from({ length: Math.min(concurrency, sentences.length) }, async () => {
     while (i < sentences.length) {
       const s = sentences[i++];
-      await generateAudioFor(s);
+      const r = await generateAudioFor(s);
+      if (r?.ok) okCount++;
+      else {
+        failedCount++;
+        if (!firstError && r?.error) firstError = r.error;
+      }
     }
   });
   await Promise.all(workers);
+  return { ok: okCount, failed: failedCount, firstError };
 }
 
 /* ---------- Import parsers ---------- */
@@ -1651,6 +1694,19 @@ document.getElementById("clear-btn").addEventListener("click", async () => {
       showSync("");
     }
   }
+});
+
+const resyncBtn = document.getElementById("resync-btn");
+resyncBtn.addEventListener("click", async () => {
+  resyncBtn.disabled = true;
+  await remoteSyncAll();
+  renderGroupChips();
+  renderList();
+  if (document.getElementById("view-play").classList.contains("active")) {
+    rebuildQueue(true);
+    renderPlayerCurrent();
+  }
+  resyncBtn.disabled = false;
 });
 
 const signoutBtn = document.getElementById("signout-btn");
